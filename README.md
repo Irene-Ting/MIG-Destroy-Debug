@@ -8,88 +8,47 @@ Testing environment:
 
  Before the experiment, no process is using GPU (`sudo lsof /dev/nvidia*` shows nothing).
 
-## Using BlackScholes as examples
-> reference: https://github.com/NVIDIA/cuda-samples
-- We will use BlackScholes_long (long-term job) and BlackScholes_short (short-term job) as examples.
-```
-cd cuda-samples/Samples/5_Domain_Specific/BlackScholes
-make
-```
-- Partition MIG instance
-```
-sudo nvidia-smi mig -i 0 -cgi 19 -C # 1g MIG instance
-sudo nvidia-smi mig -i 0 -cgi 9 -C # 3g MIG instance
-sudo nvidia-smi mig -lgi
-+-------------------------------------------------------+
-| GPU instances:                                        |
-| GPU   Name             Profile  Instance   Placement  |
-|                          ID       ID       Start:Size |
-|=======================================================|
-|   0  MIG 1g.5gb          19       13          6:1     |
-+-------------------------------------------------------+
-|   0  MIG 3g.20gb          9        1          0:4     |
-+-------------------------------------------------------+
-```
-- Run BlackScholes_short on 3g.20gb and run BlackScholes_long on 1g.5gb at the same time.
-```
-CUDA_VISIBLE_DEVICES=<MIG-3g-UUID> ./BlackScholes_short
-CUDA_VISIBLE_DEVICES=<MIG-1g-UUID> ./BlackScholes_long
-```
-- When BlackScholes_short is finished, try to destroy the 3g.20gb MIG slice. This step sometimes succeeds but sometimes does not.
-```
-$ sudo nvidia-smi mig -i 0 -dci -ci 0 -gi 1 
-Successfully destroyed compute instance ID  0 from GPU  0 GPU instance ID  1
-$ sudo nvidia-smi mig -i 0 -dgi -gi 1 
-Successfully destroyed GPU instance ID  1 from GPU  0
-```
+## Reproduce
+In the script `./test.sh`, we use `inference_long.py` (long-term job) and `inference_short.py` (short-term job) inside the folder `inference` as examples.
+
+We notice that when `inference_short.py` is finished, the compute instance in MIG 2g can be destroyed, but gpu instance can not.
 
 ```
-$ sudo nvidia-smi mig -i 0 -dci -ci 0 -gi 1 
-Successfully destroyed compute instance ID  0 from GPU  0 GPU instance ID  1
-$ sudo nvidia-smi mig -i 0 -dgi -gi 1 
-Unable to destroy GPU instance ID  1 from GPU  0: In use by another client
-Failed to destroy GPU instances: In use by another client
-```
+#!/bin/bash
+set -x 
 
-## Using LLM Inference examples
-- We will use inference_long.py (long-term job) and inference_short.py (short-term job) as examples.
-```
 cd inference
-```
-- Partition MIG instance
-```
+
+# Reset GPU
 sudo nvidia-smi --gpu-reset
-sudo nvidia-smi mig -i 0 -cgi 19 -C # 1g MIG instance
-sudo nvidia-smi mig -i 0 -cgi 9 -C # 3g MIG instance
-sudo nvidia-smi mig -lgi
-+-------------------------------------------------------+
-| GPU instances:                                        |
-| GPU   Name             Profile  Instance   Placement  |
-|                          ID       ID       Start:Size |
-|=======================================================|
-|   0  MIG 1g.5gb          19       13          6:1     |
-+-------------------------------------------------------+
-|   0  MIG 3g.20gb          9        1          0:4     |
-+-------------------------------------------------------+
-```
-- Run inference_short.py on 3g.20gb and run inference_long.py on 1g.5gb at the same time.
-```
-docker run -it --cap-add=SYS_ADMIN --gpus device=<MIG-3g-UUID>  --rm -v ./:/workspace irenetht/pytorch-flask-cuda128 python3 inference_short.py
 
-docker run -it --cap-add=SYS_ADMIN --gpus device=<MIG-1g-UUID>  --rm -v ./:/workspace irenetht/pytorch-flask-cuda128 python3 inference_long.py
-```
-- When inference_short.py is finished, try to destroy the 3g.20gb MIG slice. This step sometimes succeeds but sometimes does not.
-```
-$ sudo nvidia-smi mig -i 0 -dci -ci 0 -gi 1 
-Successfully destroyed compute instance ID  0 from GPU  0 GPU instance ID  1
-$ sudo nvidia-smi mig -i 0 -dgi -gi 1 
-Successfully destroyed GPU instance ID  1 from GPU  0
+# Create MIG 2G instance
+sudo nvidia-smi mig -i 0 -cgi 14 -C 
+
+# Run inference_short.py in the background
+export MIG_2G=$(nvidia-smi -L | grep 'MIG 2g.10gb' | awk -F 'UUID: ' '{print $2}' | tr -d ')')
+docker run -d --rm --cap-add=SYS_ADMIN --gpus device=$MIG_2G -v ./:/workspace --name short_container irenetht/pytorch-flask-cuda128 python3 inference_short.py
+
+# Create MIG 1G instance
+sudo nvidia-smi mig -i 0 -cgi 19 -C 
+export MIG_1G=$(nvidia-smi -L | grep 'MIG 1g.5gb' | awk -F 'UUID: ' '{print $2}' | tr -d ')')
+
+# Run inference_long.py in the background
+docker run -d --rm --cap-add=SYS_ADMIN --gpus device=$MIG_1G -v ./:/workspace --name long_container irenetht/pytorch-flask-cuda128 python3 inference_long.py
+
+# Wait for the short container to finish
+docker wait short_container 
+
+# Destroy MIG 2g instance
+sudo nvidia-smi mig -i 0 -dci -ci 0 -gi 5
+sudo nvidia-smi mig -i 0 -dgi -gi 5
 ```
 
+Output:
 ```
-$ sudo nvidia-smi mig -i 0 -dci -ci 0 -gi 1 
-Successfully destroyed compute instance ID  0 from GPU  0 GPU instance ID  1
-$ sudo nvidia-smi mig -i 0 -dgi -gi 1
-Unable to destroy GPU instance ID  1 from GPU  0: In use by another client
++ sudo nvidia-smi mig -i 0 -dci -ci 0 -gi 5
+Successfully destroyed compute instance ID  0 from GPU  0 GPU instance ID  5
++ sudo nvidia-smi mig -i 0 -dgi -gi 5
+Unable to destroy GPU instance ID  5 from GPU  0: In use by another client
 Failed to destroy GPU instances: In use by another client
 ```
